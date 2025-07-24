@@ -1,19 +1,17 @@
-use std::sync::Arc;
-
+use crate::request::{get_headers, PrincipalAssertion};
+use crate::response::ResponseMutator;
+use crate::schema::TimeConstraintMode;
 use envoy_types::ext_authz::v3::{
     pb::{Authorization, CheckRequest, CheckResponse},
     CheckResponseExt, OkHttpResponseBuilder,
 };
 use jsonwebtoken::{Algorithm, Validation};
 use rust_cfzt_validator::Validator;
+use std::sync::Arc;
 use tonic::{Request, Response, Status};
+use tracing::{info, warn};
 
-use super::{
-    request::{get_headers, PrincipalAssertion},
-    response::ResponseMutator,
-};
-use crate::config::bootstrap::schema::TimeConstraintMode;
-
+/// CloudflareZeroTrustAuthorizationServer is responsible for validating Cloudflare Zero Trust JWT tokens
 pub struct CloudflareZeroTrustAuthorizationServer {
     validator: Arc<Box<dyn Validator>>,
     audiences: Arc<Vec<String>>,
@@ -23,6 +21,7 @@ pub struct CloudflareZeroTrustAuthorizationServer {
 }
 
 impl CloudflareZeroTrustAuthorizationServer {
+    /// Create a new CloudflareZeroTrustAuthorizationServer
     pub fn new(
         validator: Arc<Box<dyn Validator>>,
         aud_provider: Arc<Vec<String>>,
@@ -39,7 +38,8 @@ impl CloudflareZeroTrustAuthorizationServer {
         }
     }
 
-    fn validate(&self, token: &str) -> super::StatusResult<PrincipalAssertion> {
+    /// Validate a JWT token
+    fn validate(&self, token: &str) -> Result<PrincipalAssertion, Status> {
         let mut constraints = Validation::new(Algorithm::RS256);
         constraints.set_audience(&self.audiences);
 
@@ -68,10 +68,12 @@ impl CloudflareZeroTrustAuthorizationServer {
     }
 }
 
-#[allow(unused)]
 #[tonic::async_trait]
 impl Authorization for CloudflareZeroTrustAuthorizationServer {
-    async fn check(&self, request: Request<CheckRequest>) -> super::ExtAuthzResult {
+    async fn check(
+        &self,
+        request: Request<CheckRequest>,
+    ) -> Result<Response<CheckResponse>, Status> {
         let check_request = request.into_inner();
         let client_headers = get_headers(&check_request)?;
 
@@ -79,21 +81,27 @@ impl Authorization for CloudflareZeroTrustAuthorizationServer {
         match client_headers.get(&header) {
             Some(value) => match self.validate(value) {
                 Ok(assertion) => {
-                    log::info!("Request passed validation");
+                    info!("Request passed validation");
                     let mut builder = OkHttpResponseBuilder::new();
-                    assertion.mutate_response(&mut builder);
+
+                    if let Err(e) = assertion.mutate_response(&mut builder) {
+                        return Err(Status::internal(format!(
+                            "Failed to mutate response: {}",
+                            e
+                        )));
+                    }
 
                     let mut response = CheckResponse::with_status(Status::ok("token validated"));
                     response.set_http_response(builder);
                     Ok(Response::new(response))
                 }
                 Err(e) => {
-                    log::info!("Request failed validation: {}", e.to_string());
+                    info!("Request failed validation: {}", e.to_string());
                     Err(e)
                 }
             },
             None => {
-                log::warn!("Request missing JWT header");
+                warn!("Request missing JWT header");
                 Err(Status::invalid_argument("Missing CF JWT header"))
             }
         }

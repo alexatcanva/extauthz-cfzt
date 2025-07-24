@@ -1,16 +1,19 @@
+use anyhow::{anyhow, Result};
 use envoy_types::ext_authz::v3::{pb::CheckRequest, CheckRequestExt};
-use anyhow::{Result, anyhow};
 use serde_json::Value;
 use std::collections::HashMap;
 use tonic::Status;
 
-pub fn get_headers(req: &CheckRequest) -> super::StatusResult<&HashMap<String, String>> {
+/// Get headers from a check request
+pub fn get_headers(req: &CheckRequest) -> Result<&HashMap<String, String>, Status> {
     req.get_client_headers()
         .ok_or_else(|| Status::invalid_argument("headers not provided by envoy"))
 }
 
+/// Integer type for JWT claims
 type ClaimInteger = u64;
 
+/// User assertion from a JWT
 pub struct UserAssertion {
     pub aud: Vec<String>,
     pub email: String,
@@ -25,6 +28,7 @@ pub struct UserAssertion {
     pub custom: HashMap<String, String>,
 }
 
+/// Get a required claim from a JSON object
 fn get_required_claim<'a>(
     object: &'a serde_json::map::Map<String, Value>,
     claim: &str,
@@ -32,6 +36,7 @@ fn get_required_claim<'a>(
     object.get(claim).ok_or_else(|| anyhow!("{} claim missing", claim))
 }
 
+/// Get a required string claim from a JSON object
 fn get_required_str_claim(
     object: &serde_json::map::Map<String, Value>,
     claim: &str,
@@ -42,6 +47,7 @@ fn get_required_str_claim(
         .map(|s| s.to_string())
 }
 
+/// Get a required integer claim from a JSON object
 fn get_required_int_claim(
     object: &serde_json::map::Map<String, Value>,
     claim: &str,
@@ -51,6 +57,7 @@ fn get_required_int_claim(
         .ok_or_else(|| anyhow!("{} claim should be int", claim))
 }
 
+/// Collect audiences from a JSON object
 fn collect_audiences(object: &serde_json::map::Map<String, Value>) -> Result<Vec<String>> {
     let mut audiences: Vec<String> = vec![];
 
@@ -69,6 +76,7 @@ fn collect_audiences(object: &serde_json::map::Map<String, Value>) -> Result<Vec
     Ok(audiences)
 }
 
+/// Force a JSON value to a string
 fn force_as_string(value: &Value) -> String {
     match value.as_str() {
         Some(strval) => strval.to_string(),
@@ -76,6 +84,7 @@ fn force_as_string(value: &Value) -> String {
     }
 }
 
+/// Get custom claims from a JSON object
 fn get_custom_claims(
     object: &serde_json::map::Map<String, Value>,
 ) -> Result<HashMap<String, String>> {
@@ -95,6 +104,7 @@ fn get_custom_claims(
 }
 
 impl UserAssertion {
+    /// Create a user assertion from a claims object
     fn from_claims_object(object: &serde_json::map::Map<String, Value>) -> Result<Self> {
         Ok(UserAssertion {
             aud: collect_audiences(object)?,
@@ -112,6 +122,7 @@ impl UserAssertion {
     }
 }
 
+/// Service assertion from a JWT
 pub struct ServiceAssertion {
     pub aud: Vec<String>,
     pub exp: ClaimInteger,
@@ -122,6 +133,7 @@ pub struct ServiceAssertion {
 }
 
 impl ServiceAssertion {
+    /// Create a service assertion from a claims object
     fn from_claims_object(object: &serde_json::map::Map<String, Value>) -> Result<Self> {
         Ok(ServiceAssertion {
             aud: collect_audiences(object)?,
@@ -134,12 +146,14 @@ impl ServiceAssertion {
     }
 }
 
+/// Principal assertion from a JWT (either user or service)
 pub enum PrincipalAssertion {
     User(UserAssertion),
     Service(ServiceAssertion),
 }
 
 impl PrincipalAssertion {
+    /// Create a principal assertion from a claims value
     pub fn from_claims_value(val: &serde_json::Value) -> Result<Self> {
         let object = val.as_object().ok_or_else(|| anyhow!("invalid claims value"))?;
         let subject = object

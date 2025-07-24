@@ -1,21 +1,20 @@
-mod config;
-mod health;
-mod helpers;
-mod server;
-mod sockets;
-
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use clap::Parser;
-use config::bootstrap::schema::{Configuration as BootstrapConfiguration, TimeConstraintMode};
-use health::{run_health_server, HealthState};
-use helpers::new_router;
+use extauthz_cfzt::{
+    error::AppResult,
+    health_server::{run_health_server, HealthState},
+    metrics,
+    schema::{
+        Configuration, StaticTeamValidatorConfiguration, TimeConstraintMode, ValidatorConfiguration,
+    },
+    signal::run_until_signal,
+    validation::CloudflareZeroTrustAuthorizationServer,
+};
 use rust_cfzt_validator::api::TeamKeys;
-use server::extauthz::CloudflareZeroTrustAuthorizationServer;
-
-// TODO: remove this run_server
-use sockets::run_server;
 use std::sync::Arc;
 use tokio_cron_scheduler::{Job, JobScheduler};
+use tracing::{error, info, Level};
+use tracing_subscriber::FmtSubscriber;
 
 /// Cloudflare Zero Trust External Authorization Service for Envoy
 #[derive(Parser, Debug)]
@@ -58,6 +57,10 @@ struct Cli {
     /// Observability port for metrics and health checks.
     #[arg(long, env = "OBSERVABILITY_PORT", default_value = "8083")]
     observability_port: u16,
+
+    /// Log level
+    #[arg(long, env = "LOG_LEVEL", default_value = "info")]
+    log_level: Level,
 }
 
 #[cfg(all(target_env = "musl", target_pointer_width = "64"))]
@@ -66,29 +69,43 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc; // Use mimalloc allocato
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
-    log::info!("Starting Cloudflare Zero Trust External Authorization Service");
-
     let cli = Cli::parse();
 
-    log::info!("Creating bootstrap configuration");
+    // Initialize tracing
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(cli.log_level)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("Failed to set global default subscriber");
+
+    // Initialize metrics
+    metrics::init_metrics();
+
+    info!("Starting Cloudflare Zero Trust External Authorization Service");
 
     // Retrieve static keys if provided
-    // TODO: This is super ugly. Refactor to use a better approach.
     let keys = if let Some(static_keys) = &cli.static_keys {
         Some(
             TeamKeys::from_str(&cli.team_name, static_keys)
-                .map_err(|e| anyhow!("error retrieving static keys: {}", e))?,
+                .map_err(|e| anyhow::anyhow!("Error retrieving static keys: {}", e))?,
         )
     } else {
         None
     };
 
+    // Create validator configuration
+    #[rustfmt::skip]
+    let validator_config = ValidatorConfiguration::Team(
+        StaticTeamValidatorConfiguration {
+            team_name: cli.team_name.clone(),
+            static_keys: keys,
+        }
+    );
+
     // Create the bootstrap configuration
-    let configuration = BootstrapConfiguration::new_single_team_configuration(
+    let configuration = Configuration::new(
         &cli.listener,
-        &cli.team_name,
-        keys,
+        validator_config,
         &cli.sync_schedule,
         &cli.nbf_validation,
         &cli.exp_validation,
@@ -96,14 +113,14 @@ async fn main() -> Result<()> {
 
     run(configuration, cli.audience, cli.observability_port)
         .await
-        .with_context(|| "error running server")
+        .map_err(|e| anyhow::anyhow!("Error running server: {}", e))
 }
 
 async fn run(
-    bootstrap: BootstrapConfiguration,
-    aud_provider: Vec<String>,
+    config: Configuration,
+    audiences: Vec<String>,
     observability_port: u16,
-) -> Result<()> {
+) -> AppResult<()> {
     // Initialize health state
     let health_state = Arc::new(HealthState::new());
 
@@ -111,65 +128,97 @@ async fn run(
     let health_state_clone = Arc::clone(&health_state);
     tokio::spawn(async move {
         if let Err(e) = run_health_server(health_state_clone, observability_port).await {
-            log::error!("Health server error: {}", e);
+            error!("Health server error: {}", e);
         }
     });
-    let listener = bootstrap.open_listener()?;
-    let validator = Arc::new(bootstrap.new_validator()?);
-    let mut scheduler = JobScheduler::new().await?;
 
-    let router = new_router(CloudflareZeroTrustAuthorizationServer::new(
+    // Create validator
+    let validator = Arc::new(config.new_validator()?);
+
+    // Create scheduler for key synchronization
+    let mut scheduler = JobScheduler::new()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create job scheduler: {}", e))?;
+
+    // Create authorization server
+    let server = CloudflareZeroTrustAuthorizationServer::new(
         validator.clone(),
-        Arc::new(aud_provider),
-        &bootstrap.validator.get_default_team_name(),
-        bootstrap.nbf_validation,
-        bootstrap.exp_validation,
-    ));
+        Arc::new(audiences),
+        &config.validator.get_default_team_name(),
+        config.nbf_validation,
+        config.exp_validation,
+    );
+
+    // Create router
+    let router = extauthz_cfzt::new_router(server);
 
     // Run initial sync if needed
     let health_state_clone = Arc::clone(&health_state);
-    if bootstrap.validator.requires_refresh() {
-        log::info!("Running initial validator synchronization");
+    if config.validator.requires_refresh() {
+        info!("Running initial validator synchronization");
+        metrics::inc_keys_refresh_total();
+
         if validator.sync().is_ok() {
-            log::info!("Initial validator synchronization successful");
+            info!("Initial validator synchronization successful");
             health_state_clone.mark_validator_ready();
         } else {
-            log::error!("Initial validator synchronization failed");
+            error!("Initial validator synchronization failed");
+            metrics::inc_keys_refresh_errors();
             // Don't mark ready - will retry with scheduler
         }
 
-        log::info!("Registering validator synchronization job");
+        info!("Registering validator synchronization job");
         let validator_clone = validator.clone();
         let health_state_job = health_state_clone.clone();
 
-        let sync_job = Job::new(bootstrap.sync_schedule, move |_, _| {
-            log::info!("Triggering validator synchronization");
-            match validator_clone.sync() {
-                Ok(_) => {
-                    log::info!("Validator synchronization successful");
-                    health_state_job.mark_validator_ready();
-                }
-                Err(e) => {
-                    log::error!("Validator synchronization failed: {}", e);
-                    // Don't change ready state on error
-                }
-            }
-        })?;
+        let sync_job = Job::new_async(config.sync_schedule, move |_uuid, _lock| {
+            let validator = validator_clone.clone();
+            let health_state = health_state_job.clone();
 
-        scheduler.add(sync_job).await?;
+            Box::pin(async move {
+                info!("Triggering validator synchronization");
+                metrics::inc_keys_refresh_total();
+
+                match validator.sync() {
+                    Ok(_) => {
+                        info!("Validator synchronization successful");
+                        health_state.mark_validator_ready();
+                    }
+                    Err(e) => {
+                        error!("Validator synchronization failed: {}", e);
+                        metrics::inc_keys_refresh_errors();
+                        // Don't change ready state on error
+                    }
+                }
+            })
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to create synchronization job: {}", e))?;
+
+        scheduler
+            .add(sync_job)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to add job to scheduler: {}", e))?;
     } else {
         // If no refresh is required, we're immediately ready
         health_state_clone.mark_validator_ready();
     }
 
-    log::info!("Starting validation synchronization job");
-    scheduler.start().await?;
+    info!("Starting validation synchronization job");
+    scheduler
+        .start()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to start scheduler: {}", e))?;
 
-    log::info!("Running ExtAuthz server");
-    run_server(router, listener).await?;
+    info!("Running ExtAuthz server");
 
-    log::info!("Server stopped, shutting down validation synchronization job");
-    scheduler.shutdown().await?;
+    // // Run the server until we receive a termination signal
+    // run_until_signal(async { run_server(router, listener).await }).await?;
+
+    info!("Server stopped, shutting down validation synchronization job");
+    scheduler
+        .shutdown()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to shut down scheduler: {}", e))?;
 
     Ok(())
 }

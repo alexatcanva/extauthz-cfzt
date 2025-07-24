@@ -1,17 +1,21 @@
-use envoy_types::ext_authz::v3::OkHttpResponseBuilder;
 use anyhow::Result;
+use envoy_types::ext_authz::v3::OkHttpResponseBuilder;
 
-use super::request::{PrincipalAssertion, ServiceAssertion, UserAssertion};
+use crate::request::{PrincipalAssertion, ServiceAssertion, UserAssertion};
 
+/// Get header name with prefix
 fn get_header_name(suffix: &str) -> String {
     format!("X-Cfzt-Extauthz-{suffix}")
 }
 
+/// Set a header in the builder
 fn set_header(builder: &mut OkHttpResponseBuilder, name: &str, value: &str) {
     builder.add_header(get_header_name(name), value, None, false);
 }
 
+/// Trait for objects that can mutate a response
 pub trait ResponseMutator {
+    /// Mutate a response builder
     fn mutate_response(&self, builder: &mut OkHttpResponseBuilder) -> Result<()>;
 }
 
@@ -39,7 +43,7 @@ impl ResponseMutator for UserAssertion {
 
 impl ResponseMutator for ServiceAssertion {
     fn mutate_response(&self, builder: &mut OkHttpResponseBuilder) -> Result<()> {
-        set_header(builder, "Token-Type", "User");
+        set_header(builder, "Token-Type", "Service");
         set_header(builder, "Audiences", &self.aud.join(","));
         set_header(builder, "Expiry", &self.exp.to_string());
         set_header(builder, "Issued-At", &self.iat.to_string());
