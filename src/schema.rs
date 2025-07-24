@@ -1,8 +1,7 @@
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use clap::ValueEnum;
 use rust_cfzt_validator::api::TeamKeys;
 use rust_cfzt_validator::Validator;
-use url::Url;
 
 /// The time constraint validation mode
 #[derive(Debug, Clone, PartialEq, ValueEnum)]

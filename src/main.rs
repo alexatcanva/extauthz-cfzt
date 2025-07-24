@@ -7,7 +7,6 @@ use extauthz_cfzt::{
     schema::{
         Configuration, StaticTeamValidatorConfiguration, TimeConstraintMode, ValidatorConfiguration,
     },
-    signal::run_until_signal,
     validation::CloudflareZeroTrustAuthorizationServer,
 };
 use rust_cfzt_validator::api::TeamKeys;
@@ -148,9 +147,6 @@ async fn run(
         config.nbf_validation,
         config.exp_validation,
     );
-
-    // Create router
-    let router = extauthz_cfzt::new_router(server);
 
     // Run initial sync if needed
     let health_state_clone = Arc::clone(&health_state);
