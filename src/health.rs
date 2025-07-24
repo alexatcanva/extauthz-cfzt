@@ -71,9 +71,9 @@ impl HealthState {
 /// It responds with [READY_RESPONSE] if the validator is ready,
 /// [NOT_READY_RESPONSE] if it is not ready, and [NOT_FOUND_RESPONSE] for any other
 /// requests.
-pub async fn run_health_server(state: Arc<HealthState>, address: &str) -> Result<()> {
-    let listener = TcpListener::bind(address).await?;
-    log::info!("Health server listening on {}", address);
+pub async fn run_health_server(state: Arc<HealthState>, port: u16) -> Result<()> {
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    log::info!("Health server listening on 0.0.0.0:{}", port);
 
     loop {
         let (socket, _) = match listener.accept().await {

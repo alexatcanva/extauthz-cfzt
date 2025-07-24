@@ -12,12 +12,11 @@ use super::{
     request::{get_headers, PrincipalAssertion},
     response::ResponseMutator,
 };
-use crate::config::audience::schema::AudienceProvider;
 use crate::config::bootstrap::schema::TimeConstraintMode;
 
 pub struct CloudflareZeroTrustAuthorizationServer {
     validator: Arc<Box<dyn Validator>>,
-    aud_provider: Arc<Box<dyn AudienceProvider>>,
+    audiences: Arc<Vec<String>>,
     default_team_name: String,
     nbf_validation: TimeConstraintMode,
     exp_validation: TimeConstraintMode,
@@ -26,14 +25,14 @@ pub struct CloudflareZeroTrustAuthorizationServer {
 impl CloudflareZeroTrustAuthorizationServer {
     pub fn new(
         validator: Arc<Box<dyn Validator>>,
-        aud_provider: Arc<Box<dyn AudienceProvider>>,
+        aud_provider: Arc<Vec<String>>,
         default_team_name: &str,
         nbf_validation: TimeConstraintMode,
         exp_validation: TimeConstraintMode,
     ) -> Self {
         CloudflareZeroTrustAuthorizationServer {
             validator,
-            aud_provider,
+            audiences: aud_provider,
             default_team_name: default_team_name.to_string(),
             nbf_validation,
             exp_validation,
@@ -42,7 +41,7 @@ impl CloudflareZeroTrustAuthorizationServer {
 
     fn validate(&self, token: &str) -> super::StatusResult<PrincipalAssertion> {
         let mut constraints = Validation::new(Algorithm::RS256);
-        constraints.set_audience(&self.aud_provider.get_audiences());
+        constraints.set_audience(&self.audiences);
 
         if self.nbf_validation == TimeConstraintMode::Lax {
             constraints.validate_nbf = false;

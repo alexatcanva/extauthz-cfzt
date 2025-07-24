@@ -1,28 +1,15 @@
-use std::str::FromStr;
-
 // Replace jnt::sockets::Listener with our custom implementation
 use crate::sockets::Listener;
 
 use anyhow::{anyhow, Result};
+use clap::ValueEnum;
 use rust_cfzt_validator::api::TeamKeys;
 use rust_cfzt_validator::Validator;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, ValueEnum)]
 pub enum TimeConstraintMode {
     Strict,
     Lax,
-}
-
-impl FromStr for TimeConstraintMode {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "strict" => Ok(Self::Strict),
-            "lax" => Ok(Self::Lax),
-            _ => Err(anyhow!("invalid time constraint value")),
-        }
-    }
 }
 
 pub struct StaticTeamValidatorConfiguration {

@@ -2,29 +2,28 @@ mod config;
 mod health;
 mod helpers;
 mod server;
-mod socket;
 mod sockets;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use config::audience::schema::AudienceProvider;
 use config::bootstrap::schema::{Configuration as BootstrapConfiguration, TimeConstraintMode};
 use health::{run_health_server, HealthState};
 use helpers::new_router;
+use rust_cfzt_validator::api::TeamKeys;
 use server::extauthz::CloudflareZeroTrustAuthorizationServer;
-// Using our custom socket implementation instead
-use sockets::run_server;
-use std::{process::ExitCode, str::FromStr, sync::Arc};
-use tokio::runtime::Builder;
-use tokio_cron_scheduler::{Job, JobScheduler};
 
-type ExitResult<T> = std::result::Result<T, ExitCode>;
+// TODO: remove this run_server
+use sockets::run_server;
+use std::sync::Arc;
+use tokio_cron_scheduler::{Job, JobScheduler};
 
 /// Cloudflare Zero Trust External Authorization Service for Envoy
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Socket address to listen on (e.g., "tcp://[::1]:10000")
+    /// Socket address to listen on:
+    /// - For TCP: "tcp://[::1]:10000" or "tcp://127.0.0.1:10000"
+    /// - For Unix: "unix:///tmp/extauthz.sock"
     #[arg(long, env = "LISTENER", default_value = "tcp://[::1]:10000")]
     listener: String,
 
@@ -34,7 +33,7 @@ struct Cli {
 
     /// Static JWT verification keys (optional)
     #[arg(long, env = "STATIC_KEYS", default_value = "")]
-    static_keys: String,
+    static_keys: Option<String>,
 
     /// Not Before (NBF) validation mode: strict or lax
     #[arg(long, env = "NBF_VALIDATION", default_value = "strict")]
@@ -52,117 +51,66 @@ struct Cli {
     #[arg(long, env = "AUDIENCE_PROVIDER", default_value = "static")]
     audience_provider: String,
 
-    /// Single audience value for validation
+    /// A list of audiences to validate against
     #[arg(long, env = "AUDIENCE", default_value = "")]
-    audience: String,
+    audience: Vec<String>,
 
-    /// Comma-separated list of audiences for validation
-    #[arg(long, env = "AUDIENCES", default_value = "")]
-    audiences: String,
-
-    /// Health server address
-    #[arg(long, env = "HEALTH_ADDRESS", default_value = "0.0.0.0:8080")]
-    health_address: String,
+    /// Observability port for metrics and health checks.
+    #[arg(long, env = "OBSERVABILITY_PORT", default_value = "8083")]
+    observability_port: u16,
 }
 
 #[cfg(all(target_env = "musl", target_pointer_width = "64"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc; // Use mimalloc allocator for Muslc targets
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> Result<()> {
     env_logger::init();
-    log::info!("Starting runtime");
+    log::info!("Starting Cloudflare Zero Trust External Authorization Service");
 
     let cli = Cli::parse();
-    if let Err(e) = start(cli) {
-        return e;
-    }
 
-    ExitCode::from(0)
-}
+    log::info!("Creating bootstrap configuration");
 
-fn create_bootstrap_configuration(cli: &Cli) -> Result<BootstrapConfiguration> {
-    let static_keys = if !cli.static_keys.is_empty() {
-        // Use anyhow to wrap the error
+    // Retrieve static keys if provided
+    // TODO: This is super ugly. Refactor to use a better approach.
+    let keys = if let Some(static_keys) = &cli.static_keys {
         Some(
-            rust_cfzt_validator::api::TeamKeys::from_str(&cli.team_name, &cli.static_keys)
-                .map_err(|e| anyhow!("Failed to parse team keys: {}", e))?,
+            TeamKeys::from_str(&cli.team_name, static_keys)
+                .map_err(|e| anyhow!("error retrieving static keys: {}", e))?,
         )
     } else {
         None
     };
 
-    Ok(BootstrapConfiguration::new_single_team_configuration(
+    // Create the bootstrap configuration
+    let configuration = BootstrapConfiguration::new_single_team_configuration(
         &cli.listener,
         &cli.team_name,
-        static_keys,
+        keys,
         &cli.sync_schedule,
         &cli.nbf_validation,
         &cli.exp_validation,
-    ))
-}
-
-fn create_audience_provider(cli: &Cli) -> Result<Box<dyn AudienceProvider>> {
-    use config::audience::schema::StaticAudienceProvider;
-
-    match cli.audience_provider.to_lowercase().as_str() {
-        "static" => {
-            // Try to use single audience first
-            if !cli.audience.is_empty() {
-                return Ok(Box::new(StaticAudienceProvider::new_single_aud(
-                    &cli.audience,
-                )));
-            }
-
-            // Then try multiple audiences
-            if !cli.audiences.is_empty() {
-                let audiences: Vec<String> = cli.audiences.split(',').map(String::from).collect();
-                return Ok(Box::new(StaticAudienceProvider::new(audiences)));
-            }
-
-            Err(anyhow!("No audience configured for static provider"))
-        }
-        _ => Err(anyhow!("Invalid audience provider")),
-    }
-}
-
-fn start(cli: Cli) -> ExitResult<()> {
-    let runtime = Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| helpers::handle_error(e, "error during runtime start", 1))?;
-
-    log::info!("Creating bootstrap configuration");
-    let configuration = create_bootstrap_configuration(&cli)
-        .with_context(|| "error during config creation")
-        .map_err(|e| helpers::handle_error(e, "error during config creation", 2))?;
-
-    log::info!("Creating audience provider");
-    let aud_provider = Arc::new(
-        create_audience_provider(&cli)
-            .with_context(|| "error during audience provider creation")
-            .map_err(|e| helpers::handle_error(e, "error during audience provider creation", 3))?,
     );
 
-    runtime
-        .block_on(async_main(configuration, aud_provider, &cli.health_address))
-        .with_context(|| "error during execution")
-        .map_err(|e| helpers::handle_error(e, "error during execution", 100))
+    run(configuration, cli.audience, cli.observability_port)
+        .await
+        .with_context(|| "error running server")
 }
 
-async fn async_main(
+async fn run(
     bootstrap: BootstrapConfiguration,
-    aud_provider: Arc<Box<dyn AudienceProvider>>,
-    health_address: &str,
+    aud_provider: Vec<String>,
+    observability_port: u16,
 ) -> Result<()> {
     // Initialize health state
     let health_state = Arc::new(HealthState::new());
 
     // Start health server
     let health_state_clone = Arc::clone(&health_state);
-    let health_addr = health_address.to_string(); // Clone the string to avoid lifetime issues
     tokio::spawn(async move {
-        if let Err(e) = run_health_server(health_state_clone, &health_addr).await {
+        if let Err(e) = run_health_server(health_state_clone, observability_port).await {
             log::error!("Health server error: {}", e);
         }
     });
@@ -172,7 +120,7 @@ async fn async_main(
 
     let router = new_router(CloudflareZeroTrustAuthorizationServer::new(
         validator.clone(),
-        aud_provider,
+        Arc::new(aud_provider),
         &bootstrap.validator.get_default_team_name(),
         bootstrap.nbf_validation,
         bootstrap.exp_validation,
