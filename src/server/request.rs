@@ -1,5 +1,5 @@
 use envoy_types::ext_authz::v3::{pb::CheckRequest, CheckRequestExt};
-use jnt::types::StdResult;
+use anyhow::{Result, anyhow};
 use serde_json::Value;
 use std::collections::HashMap;
 use tonic::Status;
@@ -28,40 +28,40 @@ pub struct UserAssertion {
 fn get_required_claim<'a>(
     object: &'a serde_json::map::Map<String, Value>,
     claim: &str,
-) -> StdResult<&'a Value> {
-    Ok(object.get(claim).ok_or(format!("{claim} claim missing"))?)
+) -> Result<&'a Value> {
+    object.get(claim).ok_or_else(|| anyhow!("{} claim missing", claim))
 }
 
 fn get_required_str_claim(
     object: &serde_json::map::Map<String, Value>,
     claim: &str,
-) -> StdResult<String> {
-    Ok(get_required_claim(object, claim)?
+) -> Result<String> {
+    get_required_claim(object, claim)?
         .as_str()
-        .ok_or(format!("{claim} claim should be str"))?
-        .to_string())
+        .ok_or_else(|| anyhow!("{} claim should be str", claim))
+        .map(|s| s.to_string())
 }
 
 fn get_required_int_claim(
     object: &serde_json::map::Map<String, Value>,
     claim: &str,
-) -> StdResult<ClaimInteger> {
-    Ok(get_required_claim(object, claim)?
+) -> Result<ClaimInteger> {
+    get_required_claim(object, claim)?
         .as_u64()
-        .ok_or(format!("{claim} claim should be int"))?)
+        .ok_or_else(|| anyhow!("{} claim should be int", claim))
 }
 
-fn collect_audiences(object: &serde_json::map::Map<String, Value>) -> StdResult<Vec<String>> {
+fn collect_audiences(object: &serde_json::map::Map<String, Value>) -> Result<Vec<String>> {
     let mut audiences: Vec<String> = vec![];
 
     for audience in get_required_claim(object, "aud")?
         .as_array()
-        .ok_or("aud must be array")?
+        .ok_or_else(|| anyhow!("aud must be array"))?
     {
         audiences.push(
             audience
                 .as_str()
-                .ok_or("audience values must be str")?
+                .ok_or_else(|| anyhow!("audience values must be str"))?
                 .to_string(),
         );
     }
@@ -78,11 +78,11 @@ fn force_as_string(value: &Value) -> String {
 
 fn get_custom_claims(
     object: &serde_json::map::Map<String, Value>,
-) -> StdResult<HashMap<String, String>> {
+) -> Result<HashMap<String, String>> {
     match object.get("custom") {
         Some(value) => {
             let mut claims: HashMap<String, String> = HashMap::new();
-            let custom_obj = value.as_object().ok_or("custom claim must be obj")?;
+            let custom_obj = value.as_object().ok_or_else(|| anyhow!("custom claim must be obj"))?;
 
             for (custom_claim, custom_val) in custom_obj.into_iter() {
                 claims.insert(custom_claim.to_string(), force_as_string(custom_val));
@@ -95,7 +95,7 @@ fn get_custom_claims(
 }
 
 impl UserAssertion {
-    fn from_claims_object(object: &serde_json::map::Map<String, Value>) -> StdResult<Self> {
+    fn from_claims_object(object: &serde_json::map::Map<String, Value>) -> Result<Self> {
         Ok(UserAssertion {
             aud: collect_audiences(object)?,
             email: get_required_str_claim(object, "email")?,
@@ -122,7 +122,7 @@ pub struct ServiceAssertion {
 }
 
 impl ServiceAssertion {
-    fn from_claims_object(object: &serde_json::map::Map<String, Value>) -> StdResult<Self> {
+    fn from_claims_object(object: &serde_json::map::Map<String, Value>) -> Result<Self> {
         Ok(ServiceAssertion {
             aud: collect_audiences(object)?,
             exp: get_required_int_claim(object, "exp")?,
@@ -140,13 +140,13 @@ pub enum PrincipalAssertion {
 }
 
 impl PrincipalAssertion {
-    pub fn from_claims_value(val: &serde_json::Value) -> StdResult<Self> {
-        let object = val.as_object().ok_or("invalid claims value")?;
+    pub fn from_claims_value(val: &serde_json::Value) -> Result<Self> {
+        let object = val.as_object().ok_or_else(|| anyhow!("invalid claims value"))?;
         let subject = object
             .get("sub")
-            .ok_or("sub claim missing")?
+            .ok_or_else(|| anyhow!("sub claim missing"))?
             .as_str()
-            .ok_or("sub claim must be str")?;
+            .ok_or_else(|| anyhow!("sub claim must be str"))?;
 
         if subject.is_empty() {
             return Ok(Self::Service(ServiceAssertion::from_claims_object(object)?));

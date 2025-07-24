@@ -1,5 +1,5 @@
 use envoy_types::ext_authz::v3::OkHttpResponseBuilder;
-use jnt::types::EmptyResult;
+use anyhow::Result;
 
 use super::request::{PrincipalAssertion, ServiceAssertion, UserAssertion};
 
@@ -12,11 +12,11 @@ fn set_header(builder: &mut OkHttpResponseBuilder, name: &str, value: &str) {
 }
 
 pub trait ResponseMutator {
-    fn mutate_response(&self, builder: &mut OkHttpResponseBuilder) -> EmptyResult;
+    fn mutate_response(&self, builder: &mut OkHttpResponseBuilder) -> Result<()>;
 }
 
 impl ResponseMutator for UserAssertion {
-    fn mutate_response(&self, builder: &mut OkHttpResponseBuilder) -> EmptyResult {
+    fn mutate_response(&self, builder: &mut OkHttpResponseBuilder) -> Result<()> {
         set_header(builder, "Token-Type", "User");
         set_header(builder, "Audiences", &self.aud.join(","));
         set_header(builder, "Email", &self.email);
@@ -38,7 +38,7 @@ impl ResponseMutator for UserAssertion {
 }
 
 impl ResponseMutator for ServiceAssertion {
-    fn mutate_response(&self, builder: &mut OkHttpResponseBuilder) -> EmptyResult {
+    fn mutate_response(&self, builder: &mut OkHttpResponseBuilder) -> Result<()> {
         set_header(builder, "Token-Type", "User");
         set_header(builder, "Audiences", &self.aud.join(","));
         set_header(builder, "Expiry", &self.exp.to_string());
@@ -52,7 +52,7 @@ impl ResponseMutator for ServiceAssertion {
 }
 
 impl ResponseMutator for PrincipalAssertion {
-    fn mutate_response(&self, builder: &mut OkHttpResponseBuilder) -> EmptyResult {
+    fn mutate_response(&self, builder: &mut OkHttpResponseBuilder) -> Result<()> {
         match self {
             Self::User(assertion) => assertion.mutate_response(builder),
             Self::Service(assertion) => assertion.mutate_response(builder),

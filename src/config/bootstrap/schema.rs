@@ -1,24 +1,26 @@
 use std::str::FromStr;
 
-use jnt::sockets::Listener;
-use jnt::{opaque_err, types};
+// Replace jnt::sockets::Listener with our custom implementation
+use crate::sockets::Listener;
+
+use anyhow::{anyhow, Result};
 use rust_cfzt_validator::api::TeamKeys;
 use rust_cfzt_validator::Validator;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TimeConstraintMode {
     Strict,
     Lax,
 }
 
 impl FromStr for TimeConstraintMode {
-    type Err = Box<jnt::errors::OpaqueError>;
+    type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "strict" => Ok(Self::Strict),
             "lax" => Ok(Self::Lax),
-            _ => Err(opaque_err!("invalid time constraint value")),
+            _ => Err(anyhow!("invalid time constraint value")),
         }
     }
 }
@@ -65,15 +67,15 @@ impl Configuration {
         listener: &str,
         validator_config: ValidatorConfiguration,
         sync_schedule: &str,
-        nbf_validation: TimeConstraintMode,
-        exp_validation: TimeConstraintMode,
+        nbf_validation: &TimeConstraintMode,
+        exp_validation: &TimeConstraintMode,
     ) -> Self {
         Configuration {
             listener: listener.to_string(),
             validator: validator_config,
             sync_schedule: sync_schedule.to_string(),
-            nbf_validation,
-            exp_validation,
+            nbf_validation: nbf_validation.clone(),
+            exp_validation: exp_validation.clone(),
         }
     }
 
@@ -82,8 +84,8 @@ impl Configuration {
         team_name: &str,
         static_keys: Option<TeamKeys>,
         sync_schedule: &str,
-        nbf_validation: TimeConstraintMode,
-        exp_validation: TimeConstraintMode,
+        nbf_validation: &TimeConstraintMode,
+        exp_validation: &TimeConstraintMode,
     ) -> Self {
         Configuration::new(
             listener,
@@ -97,11 +99,13 @@ impl Configuration {
         )
     }
 
-    pub fn open_listener(&self) -> types::StdResult<Listener> {
-        Listener::from_url(url::Url::parse(&self.listener)?)
+    // Use our custom Listener implementation
+    pub fn open_listener(&self) -> Result<Listener> {
+        let url = url::Url::parse(&self.listener)?;
+        Listener::from_url(url).map_err(|err| anyhow!("Failed to open listener: {:?}", err))
     }
 
-    pub fn new_validator(&self) -> types::StdResult<Box<dyn Validator>> {
+    pub fn new_validator(&self) -> Result<Box<dyn Validator>> {
         crate::server::validator::new_validator(&self.validator)
     }
 }
